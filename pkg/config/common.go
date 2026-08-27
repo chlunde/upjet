@@ -110,24 +110,96 @@ func DefaultResource(name string, terraformSchema *schema.Resource, terraformPlu
 // spec.
 func MoveToStatus(sch *schema.Resource, fieldpaths ...string) {
 	for _, f := range fieldpaths {
-		s := GetSchema(sch, f)
+		s := copySchemaAtPath(sch, f)
 		if s == nil {
-			return
+			continue
 		}
-		s.Optional = false
-		s.Computed = true
-
-		// We need to move all nodes of that field to status.
-		if el, ok := s.Elem.(*schema.Resource); ok {
-			l := make([]string, len(el.Schema))
-			i := 0
-			for fi := range el.Schema {
-				l[i] = fi
-				i++
-			}
-			MoveToStatus(el, l...)
-		}
+		moveToStatus(s)
 	}
+}
+
+// moveToStatus marks the given schema and all of its nested fields as
+// computed-only. The given schema must be exclusively owned by the caller.
+// Terraform providers may share schema pointers between resources (e.g., a
+// package-level tags schema reused by every taggable resource), so any
+// nested *schema.Resource reached via Elem is copied before it's modified
+// to avoid changing the schemas of unrelated resources.
+func moveToStatus(s *schema.Schema) {
+	s.Optional = false
+	s.Computed = true
+	el, ok := s.Elem.(*schema.Resource)
+	if !ok || el == nil {
+		return
+	}
+	nel := copyResource(el)
+	s.Elem = nel
+	for f, cs := range nel.Schema {
+		ncs := copySchema(cs)
+		nel.Schema[f] = ncs
+		moveToStatus(ncs)
+	}
+}
+
+// copySchemaAtPath walks the given fieldpath under sch like GetSchema does,
+// but replaces every schema and nested resource along the path with shallow
+// copies, and returns the copy of the schema at the end of the path. This
+// makes the returned schema (and the path leading to it) safe to mutate even
+// when the original pointers are shared with other resources of the
+// Terraform provider. Returns nil if the fieldpath cannot be resolved to a
+// schema.
+func copySchemaAtPath(sch *schema.Resource, fieldpath string) *schema.Schema {
+	if sch == nil {
+		return nil
+	}
+	current := sch
+	fields := strings.Split(fieldpath, ".")
+	final := fields[len(fields)-1]
+	formers := fields[:len(fields)-1]
+	for _, field := range formers {
+		s, ok := current.Schema[field]
+		if !ok || s == nil {
+			return nil
+		}
+		res, rok := s.Elem.(*schema.Resource)
+		if !rok || res == nil {
+			return nil
+		}
+		ns := copySchema(s)
+		nres := copyResource(res)
+		ns.Elem = nres
+		current.Schema[field] = ns
+		current = nres
+	}
+	s, ok := current.Schema[final]
+	if !ok || s == nil {
+		return nil
+	}
+	ns := copySchema(s)
+	current.Schema[final] = ns
+	return ns
+}
+
+// copySchema returns a shallow copy of the given schema. Only the struct
+// itself is duplicated so that fields such as Optional and Computed can be
+// set without affecting other resources referencing the same schema;
+// function members and the Elem are still shared with the original until
+// they are copied themselves.
+func copySchema(s *schema.Schema) *schema.Schema {
+	ns := *s
+	return &ns
+}
+
+// copyResource returns a shallow copy of the given resource with a fresh
+// Schema map so that map entries can be replaced without affecting other
+// resources referencing the same map. The map values themselves are still
+// shared with the original until they are copied themselves.
+func copyResource(r *schema.Resource) *schema.Resource {
+	nr := *r
+	nr.Schema = make(map[string]*schema.Schema, len(r.Schema))
+	for f, s := range r.Schema {
+		nr.Schema[f] = s
+	}
+	return &nr
 }
 
 // MarkAsRequired marks the given fieldpaths as required without manipulating

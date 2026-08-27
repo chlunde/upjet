@@ -189,6 +189,30 @@ func TestMoveToStatus(t *testing.T) {
 				},
 			},
 		},
+		"MissingFieldDoesNotAbortRemaining": {
+			reason: "A fieldpath that cannot be resolved should be skipped without aborting the remaining fieldpaths",
+			args: args{
+				fields: []string{"topD", "topA"},
+				sch: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"topA": {Type: schema.TypeString, Optional: true},
+						"topB": {Type: schema.TypeInt},
+					},
+				},
+			},
+			want: want{
+				sch: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"topA": {
+							Type:     schema.TypeString,
+							Optional: false,
+							Computed: true,
+						},
+						"topB": {Type: schema.TypeInt},
+					},
+				},
+			},
+		},
 		"TopLevelBasicFields": {
 			args: args{
 				fields: []string{"topA", "topB"},
@@ -301,6 +325,103 @@ func TestMoveToStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMoveToStatusSharedSchema(t *testing.T) {
+	// Terraform providers commonly share schema pointers between resources.
+	// For example, terraform-provider-aws constructs the tags schema once
+	// (via sync.OnceValue) and reuses the same *schema.Schema in every
+	// taggable resource, and some resources embed shared *schema.Resource
+	// blocks through Elem. MoveToStatus must not mutate such shared schemas
+	// in place; otherwise, moving a field to status in one resource silently
+	// flips {Optional, Computed} for all other resources in the process.
+	newFixtures := func() (sharedLeaf *schema.Schema, sharedNested *schema.Resource, r1, r2 *schema.Resource) {
+		sharedLeaf = &schema.Schema{
+			Type:     schema.TypeMap,
+			Optional: true,
+			Elem:     &schema.Schema{Type: schema.TypeString},
+		}
+		sharedNested = &schema.Resource{
+			Schema: map[string]*schema.Schema{
+				"tags":    sharedLeaf,
+				"max_age": {Type: schema.TypeInt, Optional: true},
+			},
+		}
+		newResource := func() *schema.Resource {
+			return &schema.Resource{
+				Schema: map[string]*schema.Schema{
+					"tags": sharedLeaf,
+					"rule": {
+						Type:     schema.TypeList,
+						Optional: true,
+						Elem:     sharedNested,
+					},
+				},
+			}
+		}
+		return sharedLeaf, sharedNested, newResource(), newResource()
+	}
+
+	assertMoved := func(t *testing.T, name string, s *schema.Schema) {
+		t.Helper()
+		if s == nil {
+			t.Errorf("schema %q: not found", name)
+			return
+		}
+		if s.Optional || !s.Computed {
+			t.Errorf("schema %q: got {Optional: %t, Computed: %t}, want {Optional: false, Computed: true}", name, s.Optional, s.Computed)
+		}
+	}
+	assertUntouched := func(t *testing.T, sharedLeaf *schema.Schema, sharedNested *schema.Resource, r2 *schema.Resource) {
+		t.Helper()
+		if !sharedLeaf.Optional || sharedLeaf.Computed {
+			t.Errorf("shared leaf schema mutated in place: got {Optional: %t, Computed: %t}, want {Optional: true, Computed: false}", sharedLeaf.Optional, sharedLeaf.Computed)
+		}
+		for name, s := range sharedNested.Schema {
+			if !s.Optional || s.Computed {
+				t.Errorf("shared nested schema field %q mutated in place: got {Optional: %t, Computed: %t}, want {Optional: true, Computed: false}", name, s.Optional, s.Computed)
+			}
+		}
+		for _, fp := range []string{"tags", "rule", "rule.tags", "rule.max_age"} {
+			s := GetSchema(r2, fp)
+			if s == nil {
+				t.Errorf("unrelated resource: schema %q not found", fp)
+				continue
+			}
+			if !s.Optional || s.Computed {
+				t.Errorf("unrelated resource: schema %q mutated: got {Optional: %t, Computed: %t}, want {Optional: true, Computed: false}", fp, s.Optional, s.Computed)
+			}
+		}
+	}
+
+	t.Run("TopLevelSharedLeaf", func(t *testing.T) {
+		sharedLeaf, sharedNested, r1, r2 := newFixtures()
+		MoveToStatus(r1, "tags")
+		assertMoved(t, "tags", r1.Schema["tags"])
+		assertUntouched(t, sharedLeaf, sharedNested, r2)
+	})
+
+	t.Run("SharedNestedResourceViaElem", func(t *testing.T) {
+		sharedLeaf, sharedNested, r1, r2 := newFixtures()
+		MoveToStatus(r1, "rule")
+		assertMoved(t, "rule", r1.Schema["rule"])
+		assertMoved(t, "rule.tags", GetSchema(r1, "rule.tags"))
+		assertMoved(t, "rule.max_age", GetSchema(r1, "rule.max_age"))
+		if el, ok := r1.Schema["rule"].Elem.(*schema.Resource); ok && el == sharedNested {
+			t.Errorf("rule.Elem still points at the shared nested resource; it must be copied before mutation")
+		}
+		assertUntouched(t, sharedLeaf, sharedNested, r2)
+	})
+
+	t.Run("LeafUnderSharedNestedResource", func(t *testing.T) {
+		sharedLeaf, sharedNested, r1, r2 := newFixtures()
+		MoveToStatus(r1, "rule.tags")
+		assertMoved(t, "rule.tags", GetSchema(r1, "rule.tags"))
+		if s := GetSchema(r1, "rule.max_age"); s == nil || !s.Optional || s.Computed {
+			t.Errorf("sibling schema \"rule.max_age\" should not be moved to status")
+		}
+		assertUntouched(t, sharedLeaf, sharedNested, r2)
+	})
 }
 
 func TestMarkAsRequired(t *testing.T) {
