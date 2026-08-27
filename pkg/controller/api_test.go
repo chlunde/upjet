@@ -12,8 +12,10 @@ import (
 	xpresource "github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	xpfake "github.com/crossplane/crossplane-runtime/v2/pkg/resource/fake"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/test"
+	xpv2 "github.com/crossplane/crossplane/apis/v2/core/v2"
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrl "sigs.k8s.io/controller-runtime/pkg/manager"
@@ -23,6 +25,90 @@ import (
 	"github.com/crossplane/upjet/v2/pkg/resource/fake"
 	tjerrors "github.com/crossplane/upjet/v2/pkg/terraform/errors"
 )
+
+func TestAPISecretClientGetSecretValue(t *testing.T) {
+	errBoom := errors.New("boom")
+	sel := xpv2.SecretKeySelector{
+		SecretReference: xpv2.SecretReference{
+			Name:      "db-conn",
+			Namespace: "crossplane-system",
+		},
+		Key: "password",
+	}
+	type args struct {
+		kube client.Client
+		sel  xpv2.SecretKeySelector
+	}
+	type want struct {
+		value []byte
+		err   error
+	}
+	cases := map[string]struct {
+		reason string
+		args
+		want
+	}{
+		"SecretGetFailed": {
+			reason: "It should return a wrapped error if the secret cannot be retrieved",
+			args: args{
+				kube: &test.MockClient{
+					MockGet: test.NewMockGetFn(errBoom),
+				},
+				sel: sel,
+			},
+			want: want{
+				err: errors.Wrap(errBoom, "cannot get secret data"),
+			},
+		},
+		"KeyNotFound": {
+			reason: "It should return an error if the secret exists but does not have the selected key",
+			args: args{
+				kube: &test.MockClient{
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						obj.(*corev1.Secret).Data = map[string][]byte{
+							"username": []byte("admin"),
+						}
+						return nil
+					}),
+				},
+				sel: sel,
+			},
+			want: want{
+				err: errors.Errorf("secret %s/%s has no key %q", "crossplane-system", "db-conn", "password"),
+			},
+		},
+		"Successful": {
+			reason: "It should return the value of the selected key",
+			args: args{
+				kube: &test.MockClient{
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						obj.(*corev1.Secret).Data = map[string][]byte{
+							"username": []byte("admin"),
+							"password": []byte("secret"),
+						}
+						return nil
+					}),
+				},
+				sel: sel,
+			},
+			want: want{
+				value: []byte("secret"),
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			a := &APISecretClient{kube: tc.args.kube}
+			got, err := a.GetSecretValue(context.TODO(), tc.args.sel)
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\nGetSecretValue(...): -want error, +got error:\n%s", tc.reason, diff)
+			}
+			if diff := cmp.Diff(tc.want.value, got); diff != "" {
+				t.Errorf("\n%s\nGetSecretValue(...): -want value, +got value:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
 
 func TestAPICallbacksCreate(t *testing.T) {
 	type args struct {

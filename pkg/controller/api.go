@@ -68,7 +68,11 @@ func (a *APISecretClient) GetSecretValue(ctx context.Context, sel xpv2.SecretKey
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot get secret data")
 	}
-	return d[sel.Key], err
+	v, ok := d[sel.Key]
+	if !ok {
+		return nil, errors.Errorf("secret %s/%s has no key %q", sel.Namespace, sel.Name, sel.Key)
+	}
+	return v, nil
 }
 
 // APICallbacksOption represents a configurable option for the APICallbacks
