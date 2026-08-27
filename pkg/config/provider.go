@@ -441,6 +441,14 @@ func NewProvider(schema []byte, prefix string, modulePath string, metadata []byt
 					continue
 				}
 				terraformResource.Schema = terraformResource.SchemaFunc()
+				// The Terraform plugin SDK considers it invalid to have both
+				// Schema and SchemaFunc set (Resource.InternalValidate) and
+				// Resource.SchemaMap prefers SchemaFunc over Schema, which
+				// would both hide any configuration made on the materialized
+				// Schema from the SDK and rebuild the schema map on every
+				// SchemaMap call. Clear SchemaFunc now that the schema has
+				// been materialized.
+				terraformResource.SchemaFunc = nil
 			}
 		}
 
