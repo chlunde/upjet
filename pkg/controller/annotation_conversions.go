@@ -19,6 +19,26 @@ import (
 	"github.com/crossplane/upjet/v2/pkg/types/name"
 )
 
+// convertFieldPathToSnake converts each field name segment of the given
+// camelCase field path to snake_case, preserving the structure of the path,
+// i.e. the "." separators and the array index segments, e.g.
+// "fooBar[0].bazQux" is converted to "foo_bar[0].baz_qux". Field name
+// segments without any upper-case characters are kept as they are, so that a
+// path already in snake_case (e.g. "ipv6_addresses") is returned unchanged.
+func convertFieldPathToSnake(fieldPath string) (string, error) {
+	segments, err := fieldpath.Parse(fieldPath)
+	if err != nil {
+		return "", errors.Wrapf(err, "cannot parse the field path %q", fieldPath)
+	}
+	for i, s := range segments {
+		if s.Type != fieldpath.SegmentField || strings.ToLower(s.Field) == s.Field {
+			continue
+		}
+		segments[i].Field = name.NewFromCamel(s.Field).Snake
+	}
+	return segments.String(), nil
+}
+
 // mergeAnnotationFieldsWithSpec merges field values stored in annotations back into
 // the spec.forProvider and spec.initProvider parameter maps. This function is critical
 // for handling API version compatibility when controllers run older API versions.
@@ -76,7 +96,10 @@ func mergeAnnotationFieldsWithSpec(tr resource.Terraformed, shouldMergeInitProvi
 			switch {
 			case strings.HasPrefix(fieldPath, "spec.forProvider."):
 				key := strings.TrimPrefix(fieldPath, "spec.forProvider.")
-				snakeKey := name.NewFromCamel(key).Snake
+				snakeKey, err := convertFieldPathToSnake(key)
+				if err != nil {
+					return nil, err
+				}
 				currentValue, err := parametersPaved.GetValue(snakeKey)
 				if err != nil {
 					if fieldpath.IsNotFound(err) {
@@ -97,7 +120,10 @@ func mergeAnnotationFieldsWithSpec(tr resource.Terraformed, shouldMergeInitProvi
 				}
 			case strings.HasPrefix(fieldPath, "spec.initProvider.") && shouldMergeInitProvider:
 				key := strings.TrimPrefix(fieldPath, "spec.initProvider.")
-				snakeKey := name.NewFromCamel(key).Snake
+				snakeKey, err := convertFieldPathToSnake(key)
+				if err != nil {
+					return nil, err
+				}
 				currentValue, err := initParametersPaved.GetValue(snakeKey)
 				if err != nil {
 					if fieldpath.IsNotFound(err) {
@@ -201,7 +227,10 @@ func moveTFStateValuesToAnnotation(tfObservation map[string]any, atProvider map[
 	updated := false
 	for _, path := range paths {
 		p := strings.TrimPrefix(path, "status.atProvider.")
-		snakeP := name.NewFromCamel(p).Snake
+		snakeP, err := convertFieldPathToSnake(p)
+		if err != nil {
+			return false, err
+		}
 		tfFieldValue, err := tfObservationPaved.GetValue(snakeP)
 		if err != nil {
 			return false, errors.Wrapf(err, "cannot get value for %s", snakeP)
@@ -288,7 +317,10 @@ func mergeAnnotationFieldsWithStatus(atProvider map[string]any, annotations map[
 	for fieldPath, annotationFieldValue := range fieldMap {
 		if strings.HasPrefix(fieldPath, "status.atProvider.") {
 			key := strings.TrimPrefix(fieldPath, "status.atProvider.")
-			snakeKey := name.NewFromCamel(key).Snake
+			snakeKey, err := convertFieldPathToSnake(key)
+			if err != nil {
+				return err
+			}
 			currentValue, err := atProviderPaved.GetValue(snakeKey)
 			if err != nil {
 				if fieldpath.IsNotFound(err) {
