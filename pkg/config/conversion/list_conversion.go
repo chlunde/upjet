@@ -72,6 +72,30 @@ func setValue(pv *fieldpath.Paved, v any, fp string) error {
 	return nil
 }
 
+// fieldPathWildcard is the wildcard expression used in place of the array
+// index segments of a field path expression.
+const fieldPathWildcard = "*"
+
+// wildcardIndexedPath replaces the array index segments of the given expanded
+// field path with the "*" wildcard, preserving the rest of the path, e.g.,
+// "parent[0].child" becomes "parent[*].child" and "rule[10].filter" becomes
+// "rule[*].filter". This makes an expanded field path comparable with the
+// wildcard field path expressions that are used as the keys of
+// ConvertOptions.ListInjectKeys.
+func wildcardIndexedPath(fp string) (string, error) {
+	segments, err := fieldpath.Parse(fp)
+	if err != nil {
+		return "", errors.Wrapf(err, "cannot parse the field path %q", fp)
+	}
+	for i, s := range segments {
+		if s.Type != fieldpath.SegmentIndex {
+			continue
+		}
+		segments[i] = fieldpath.Field(fieldPathWildcard)
+	}
+	return segments.String(), nil
+}
+
 type SingletonListInjectKey struct {
 	Key   string
 	Value string
@@ -113,15 +137,22 @@ func Convert(params map[string]any, p []string, mode ListConversionMode, opts *C
 			if err != nil {
 				return nil, errors.Wrapf(err, "cannot get the value at the field path %s with the conversion mode set to %q", e, mode)
 			}
+			// We replace the array index segments of the expanded path with
+			// "*" to be able to stay consistent with the paths parameter in
+			// the keys of opts.ListInjectKeys.
+			var inj SingletonListInjectKey
+			if opts != nil {
+				wp, err := wildcardIndexedPath(e)
+				if err != nil {
+					return nil, err
+				}
+				inj = opts.ListInjectKeys[wp]
+			}
 			switch mode {
 			case ToSingletonList:
-				if opts != nil {
-					// We replace 0th index with "*" to be able to stay consistent
-					// with the paths parameter in the keys of opts.ListInjectKeys.
-					if inj, ok := opts.ListInjectKeys[strings.ReplaceAll(e, "0", "*")]; ok && inj.Key != "" && inj.Value != "" {
-						if m, ok := v.(map[string]any); ok {
-							m[inj.Key] = inj.Value
-						}
+				if inj.Key != "" && inj.Value != "" {
+					if m, ok := v.(map[string]any); ok {
+						m[inj.Key] = inj.Value
 					}
 				}
 				if err := setValue(pv, []any{v}, e); err != nil {
@@ -143,12 +174,8 @@ func Convert(params map[string]any, p []string, mode ListConversionMode, opts *C
 						newVal = s[0]
 					}
 				}
-				if opts != nil {
-					// We replace 0th index with "*" to be able to stay consistent
-					// with the paths parameter in the keys of opts.ListInjectKeys.
-					if inj, ok := opts.ListInjectKeys[strings.ReplaceAll(e, "0", "*")]; ok && inj.Key != "" && inj.Value != "" {
-						delete(newVal.(map[string]any), inj.Key)
-					}
+				if inj.Key != "" && inj.Value != "" {
+					delete(newVal.(map[string]any), inj.Key)
 				}
 				if err := setValue(pv, newVal, e); err != nil {
 					return nil, errors.Wrapf(err, "cannot set the embedded object's value at the field path %s", e)

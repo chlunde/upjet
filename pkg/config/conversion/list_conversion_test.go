@@ -5,6 +5,7 @@
 package conversion
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -411,6 +412,164 @@ func TestConvert(t *testing.T) {
 				},
 			},
 		},
+		"WithInjectedKeyNonZeroIndexEmbeddedObjectsToSingletonLists": {
+			reason: "Should inject the key into every element of the parent list, not only the one at index 0.",
+			args: args{
+				params: parentWithChildren(2, false),
+				paths:  []string{"parent[*].child"},
+				mode:   ToSingletonList,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"parent[*].child": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: parentWithChildren(2, true),
+			},
+		},
+		"WithInjectedKeyNonZeroIndexSingletonListsToEmbeddedObjects": {
+			reason: "Should remove the injected key from every element of the parent list, not only the one at index 0.",
+			args: args{
+				params: parentWithChildren(2, true),
+				paths:  []string{"parent[*].child"},
+				mode:   ToEmbeddedObject,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"parent[*].child": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: parentWithChildren(2, false),
+			},
+		},
+		"WithInjectedKeyIndexGreaterThanNine": {
+			reason: "Should inject the key at an index whose decimal representation contains a 0, e.g. 10.",
+			args: args{
+				params: parentWithChildren(11, false),
+				paths:  []string{"parent[*].child"},
+				mode:   ToSingletonList,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"parent[*].child": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: parentWithChildren(11, true),
+			},
+		},
+		"WithInjectedKeyFieldNameContainingZero": {
+			reason: "Should inject the key at a path whose field names contain the digit 0.",
+			args: args{
+				params: map[string]any{
+					"x509_config": map[string]any{
+						"k": "v",
+					},
+				},
+				paths: []string{"x509_config"},
+				mode:  ToSingletonList,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"x509_config": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: map[string]any{
+					"x509_config": []map[string]any{
+						{
+							"k":     "v",
+							"index": "0",
+						},
+					},
+				},
+			},
+		},
+		"WithInjectedKeyFieldNameContainingZeroSingletonListToEmbeddedObject": {
+			reason: "Should remove the injected key at a path whose field names contain the digit 0.",
+			args: args{
+				params: map[string]any{
+					"x509_config": []map[string]any{
+						{
+							"k":     "v",
+							"index": "0",
+						},
+					},
+				},
+				paths: []string{"x509_config"},
+				mode:  ToEmbeddedObject,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"x509_config": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: map[string]any{
+					"x509_config": map[string]any{
+						"k": "v",
+					},
+				},
+			},
+		},
+		"WithInjectedKeyMultipleIndicesInPath": {
+			reason: "Should inject the key at a nested path carrying more than one array index.",
+			args: args{
+				params: map[string]any{
+					"a": []any{
+						map[string]any{"b": []any{
+							map[string]any{"c": map[string]any{"k": "v00"}},
+							map[string]any{"c": map[string]any{"k": "v01"}},
+						}},
+						map[string]any{"b": []any{
+							map[string]any{"c": map[string]any{"k": "v10"}},
+							map[string]any{"c": map[string]any{"k": "v11"}},
+						}},
+					},
+				},
+				paths: []string{"a[*].b[*].c"},
+				mode:  ToSingletonList,
+				opts: &ConvertOptions{
+					ListInjectKeys: map[string]SingletonListInjectKey{
+						"a[*].b[*].c": {
+							Key:   "index",
+							Value: "0",
+						},
+					},
+				},
+			},
+			want: want{
+				params: map[string]any{
+					"a": []any{
+						map[string]any{"b": []any{
+							map[string]any{"c": []any{map[string]any{"k": "v00", "index": "0"}}},
+							map[string]any{"c": []any{map[string]any{"k": "v01", "index": "0"}}},
+						}},
+						map[string]any{"b": []any{
+							map[string]any{"c": []any{map[string]any{"k": "v10", "index": "0"}}},
+							map[string]any{"c": []any{map[string]any{"k": "v11", "index": "0"}}},
+						}},
+					},
+				},
+			},
+		},
 	}
 
 	for n, tt := range tests {
@@ -471,4 +630,99 @@ func roundTrip(m map[string]any) (map[string]any, error) {
 	}
 	var r map[string]any
 	return r, jsoniter.ConfigCompatibleWithStandardLibrary.Unmarshal(buff, &r)
+}
+
+// parentWithChildren builds a "parent" list of n elements, each holding a
+// "child" embedded object. If asSingletonList is true, each child is instead
+// a singleton list carrying the injected "index" key, i.e. the expected
+// result of a ToSingletonList conversion of the same input.
+func parentWithChildren(n int, asSingletonList bool) map[string]any {
+	parent := make([]any, 0, n)
+	for i := 0; i < n; i++ {
+		child := map[string]any{"k": fmt.Sprintf("v%d", i)}
+		var c any = child
+		if asSingletonList {
+			child["index"] = "0"
+			c = []any{child}
+		}
+		parent = append(parent, map[string]any{"child": c})
+	}
+	return map[string]any{"parent": parent}
+}
+
+func TestWildcardIndexedPath(t *testing.T) {
+	tests := map[string]struct {
+		reason  string
+		path    string
+		want    string
+		wantErr bool
+	}{
+		"Empty": {
+			reason: "An empty path should be returned as is.",
+			path:   "",
+			want:   "",
+		},
+		"NoIndex": {
+			reason: "A path without any index segments should be returned as is.",
+			path:   "vpcConfig",
+			want:   "vpcConfig",
+		},
+		"ZeroIndex": {
+			reason: "The zero index segment should be replaced with the wildcard.",
+			path:   "parent[0].child",
+			want:   "parent[*].child",
+		},
+		"NonZeroIndex": {
+			reason: "A non-zero index segment should be replaced with the wildcard.",
+			path:   "parent[1].child",
+			want:   "parent[*].child",
+		},
+		"IndexGreaterThanNine": {
+			reason: "An index whose decimal representation contains a 0 should be replaced as a whole.",
+			path:   "rule[10].filter",
+			want:   "rule[*].filter",
+		},
+		"FieldNameContainingZero": {
+			reason: "A field name containing the digit 0 should not be touched.",
+			path:   "x509_config",
+			want:   "x509_config",
+		},
+		"FieldNameContainingZeroWithIndex": {
+			reason: "Only the index segments of a path with digit-bearing field names should be replaced.",
+			path:   "x509_config[10].sha1_digest",
+			want:   "x509_config[*].sha1_digest",
+		},
+		"MultipleIndices": {
+			reason: "Every index segment of the path should be replaced.",
+			path:   "a[0].b[10].c",
+			want:   "a[*].b[*].c",
+		},
+		"AlreadyWildcard": {
+			reason: "The conversion should be idempotent on an already wildcarded path.",
+			path:   "parent[*].child",
+			want:   "parent[*].child",
+		},
+		"InvalidPath": {
+			reason:  "An unparsable field path should result in an error.",
+			path:    "parent..child",
+			wantErr: true,
+		},
+	}
+	for n, tt := range tests {
+		t.Run(n, func(t *testing.T) {
+			got, err := wildcardIndexedPath(tt.path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("\n%s\nwildcardIndexedPath(%q): want error, got %q", tt.reason, tt.path, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("\n%s\nwildcardIndexedPath(%q): unexpected error: %v", tt.reason, tt.path, err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("\n%s\nwildcardIndexedPath(%q): -want, +got:\n%s", tt.reason, tt.path, diff)
+			}
+		})
+	}
 }
