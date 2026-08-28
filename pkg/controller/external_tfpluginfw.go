@@ -472,7 +472,7 @@ func (n *terraformPluginFrameworkExternalClient) filterRequiresReplace(ctx conte
 		}
 		tfType, err := n.resourceSchema.TypeAtTerraformPath(ctx, path)
 		if err != nil {
-			return errors.New("cannot get the type at path from resource schema: %v")
+			return errors.Wrap(err, "cannot get the type at path from resource schema")
 		}
 
 		priorVal, ok := priorValInt.(tftypes.Value)
@@ -492,6 +492,7 @@ func (n *terraformPluginFrameworkExternalClient) filterRequiresReplace(ctx conte
 		}
 		if !plannedVal.Equal(priorVal) {
 			filteredRequiresReplace = append(filteredRequiresReplace, path)
+			continue
 		}
 		n.logger.Debug("TF plan reported a diff at path that require resource replacement, but the prior and plan values are equal. Skipping...", "path", path)
 	}
@@ -865,14 +866,11 @@ func (n *terraformPluginFrameworkExternalClient) planRequiresReplace() (bool, st
 		return false, ""
 	}
 
-	var sb strings.Builder
-	sb.WriteString("diff contains fields that require resource replacement: ")
+	fields := make([]string, 0, len(n.planResponse.RequiresReplace))
 	for _, attrPath := range n.planResponse.RequiresReplace {
-		sb.WriteString(attrPath.String())
-		sb.WriteString(", ")
+		fields = append(fields, attrPath.String())
 	}
-	return true, sb.String()
-
+	return true, strings.Join(fields, ", ")
 }
 
 func (n *terraformPluginFrameworkExternalClient) Update(ctx context.Context, mg xpresource.Managed) (managed.ExternalUpdate, error) { //nolint:gocyclo // easier to follow as a unit

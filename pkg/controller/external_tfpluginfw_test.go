@@ -8,10 +8,12 @@ import (
 	"context"
 	"testing"
 
+	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/reconciler/managed"
 	xpresource "github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/test"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -1649,6 +1651,159 @@ func TestFilteredDiffExistsNestedAttributeRemoval(t *testing.T) {
 			got := n.filteredDiffExists(ctx, rawDiff)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("%s\nfilteredDiffExists(...): -want, +got:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
+// recordingLogger is a logging.Logger that keeps the Debug messages it is
+// given, so that tests can assert on the breadcrumbs a code path leaves.
+type recordingLogger struct {
+	debug *[]string
+}
+
+func newRecordingLogger() recordingLogger {
+	return recordingLogger{debug: &[]string{}}
+}
+
+func (recordingLogger) Info(_ string, _ ...any) {}
+
+func (l recordingLogger) Debug(msg string, _ ...any) {
+	*l.debug = append(*l.debug, msg)
+}
+
+func (l recordingLogger) WithValues(_ ...any) logging.Logger { return l }
+
+func TestPlanRequiresReplace(t *testing.T) {
+	path := func(name string) *tftypes.AttributePath {
+		return tftypes.NewAttributePath().WithAttributeName(name)
+	}
+	cases := map[string]struct {
+		planResponse *tfprotov6.PlanResourceChangeResponse
+		wantReplace  bool
+		wantFields   string
+	}{
+		"NoPlan": {
+			planResponse: nil,
+		},
+		"NoFieldsRequireReplacement": {
+			planResponse: &tfprotov6.PlanResourceChangeResponse{},
+		},
+		"SingleField": {
+			planResponse: &tfprotov6.PlanResourceChangeResponse{
+				RequiresReplace: []*tftypes.AttributePath{path("eventTypeIds")},
+			},
+			wantReplace: true,
+			wantFields:  `AttributeName("eventTypeIds")`,
+		},
+		"MultipleFields": {
+			planResponse: &tfprotov6.PlanResourceChangeResponse{
+				RequiresReplace: []*tftypes.AttributePath{path("eventTypeIds"), path("name")},
+			},
+			wantReplace: true,
+			wantFields:  `AttributeName("eventTypeIds"), AttributeName("name")`,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			n := &terraformPluginFrameworkExternalClient{planResponse: tc.planResponse}
+			isReplace, fields := n.planRequiresReplace()
+			if diff := cmp.Diff(tc.wantReplace, isReplace); diff != "" {
+				t.Errorf("\n%s\nplanRequiresReplace(): -want, +got:\n", diff)
+			}
+			if diff := cmp.Diff(tc.wantFields, fields); diff != "" {
+				t.Errorf("\n%s\nplanRequiresReplace(): -want fields, +got fields:\n", diff)
+			}
+		})
+	}
+}
+
+// TestTPFUpdateRequiresReplaceMessage asserts the message a user actually sees
+// on the Synced condition when an update would require replacing the resource.
+func TestTPFUpdateRequiresReplaceMessage(t *testing.T) {
+	testConfig := testConfiguration{
+		r:   newMockBaseTPFResource(),
+		cfg: newBaseUpjetConfig(),
+		obj: newBaseObject(),
+		currentStateMap: map[string]any{
+			"name": "example",
+			"id":   "example-id",
+		},
+		plannedStateMap: map[string]any{
+			"name": "example-updated",
+			"id":   "example-id",
+		},
+		params: map[string]any{
+			"name": "example-updated",
+		},
+	}
+	tpfExternal := prepareTPFExternalWithTestConfig(testConfig)
+	tpfExternal.planResponse.RequiresReplace = []*tftypes.AttributePath{
+		tftypes.NewAttributePath().WithAttributeName("name"),
+	}
+
+	_, err := tpfExternal.Update(context.TODO(), &testConfig.obj)
+	want := errors.New(`diff contains fields that require resource replacement: AttributeName("name")`)
+	if diff := cmp.Diff(want, err, test.EquateErrors()); diff != "" {
+		t.Errorf("\n%s\nUpdate(...): -want error, +got error:\n", diff)
+	}
+}
+
+// TestFilterRequiresReplaceSkipLogging asserts that the "the prior and plan
+// values are equal. Skipping..." breadcrumb is only left for the paths that
+// are actually skipped.
+func TestFilterRequiresReplaceSkipLogging(t *testing.T) {
+	namePath := tftypes.NewAttributePath().WithAttributeName("name")
+	cases := map[string]struct {
+		plannedName      string
+		wantReplace      []*tftypes.AttributePath
+		wantDebugSkipped bool
+	}{
+		"ValuesDifferPathKept": {
+			plannedName: "example-updated",
+			wantReplace: []*tftypes.AttributePath{namePath},
+		},
+		"ValuesEqualPathSkipped": {
+			plannedName:      "example",
+			wantDebugSkipped: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			testConfig := testConfiguration{
+				r:   newMockBaseTPFResource(),
+				cfg: newBaseUpjetConfig(),
+				obj: newBaseObject(),
+			}
+			tpfExternal := prepareTPFExternalWithTestConfig(testConfig)
+			logger := newRecordingLogger()
+			tpfExternal.logger = logger
+
+			stateValue, err := tfValueFromMap(map[string]any{"name": "example", "id": "example-id"}, tpfExternal.resourceValueTerraformType)
+			if err != nil {
+				t.Fatalf("cannot construct the prior state value: %v", err)
+			}
+			plannedValue, err := tfValueFromMap(map[string]any{"name": tc.plannedName, "id": "example-id"}, tpfExternal.resourceValueTerraformType)
+			if err != nil {
+				t.Fatalf("cannot construct the planned state value: %v", err)
+			}
+
+			planResponse := &tfprotov6.PlanResourceChangeResponse{
+				RequiresReplace: []*tftypes.AttributePath{namePath},
+			}
+			if err := tpfExternal.filterRequiresReplace(context.TODO(), planResponse, stateValue, plannedValue); err != nil {
+				t.Fatalf("filterRequiresReplace(...): unexpected error: %v", err)
+			}
+			if diff := cmp.Diff(tc.wantReplace, planResponse.RequiresReplace); diff != "" {
+				t.Errorf("\n%s\nfilterRequiresReplace(...): -want RequiresReplace, +got RequiresReplace:\n", diff)
+			}
+
+			var wantDebug []string
+			if tc.wantDebugSkipped {
+				wantDebug = []string{"TF plan reported a diff at path that require resource replacement, but the prior and plan values are equal. Skipping..."}
+			}
+			if diff := cmp.Diff(wantDebug, *logger.debug, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("\n%s\nfilterRequiresReplace(...): -want debug messages, +got debug messages:\n", diff)
 			}
 		})
 	}
