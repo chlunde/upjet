@@ -926,6 +926,14 @@ func (n *terraformPluginFrameworkExternalClient) Update(ctx context.Context, mg 
 		stateValueMap = goval.(map[string]any)
 	}
 
+	// we get the connection details from the observed state before
+	// the conversion because the sensitive paths assume the native Terraform
+	// schema.
+	conn, err := resource.GetConnectionDetails(stateValueMap, mg.(resource.Terraformed), n.config)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, "cannot get connection details")
+	}
+
 	stateValueMap, err = n.config.ApplyTFConversions(stateValueMap, config.FromTerraform)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrap(err, "cannot apply TF conversions to state value map after update")
@@ -947,7 +955,7 @@ func (n *terraformPluginFrameworkExternalClient) Update(ctx context.Context, mg 
 		mg.SetAnnotations(annotations)
 	}
 
-	return managed.ExternalUpdate{}, nil
+	return managed.ExternalUpdate{ConnectionDetails: conn}, nil
 }
 
 func (n *terraformPluginFrameworkExternalClient) Delete(ctx context.Context, _ xpresource.Managed) (managed.ExternalDelete, error) {

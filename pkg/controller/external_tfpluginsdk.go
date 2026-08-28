@@ -786,6 +786,14 @@ func (n *terraformPluginSDKExternal) Update(ctx context.Context, mg xpresource.M
 		return managed.ExternalUpdate{}, err
 	}
 
+	// we get the connection details from the observed state before
+	// the conversion because the sensitive paths assume the native Terraform
+	// schema.
+	conn, err := resource.GetConnectionDetails(stateValueMap, mg.(resource.Terraformed), n.config)
+	if err != nil {
+		return managed.ExternalUpdate{}, errors.Wrap(err, "cannot get connection details")
+	}
+
 	stateValueMap, err = n.config.ApplyTFConversions(stateValueMap, config.FromTerraform)
 	if err != nil {
 		return managed.ExternalUpdate{}, errors.Wrap(err, "cannot convert the singleton lists for the updated resource state value map into embedded objects")
@@ -804,7 +812,7 @@ func (n *terraformPluginSDKExternal) Update(ctx context.Context, mg xpresource.M
 	} else if annotationUpdate {
 		mg.SetAnnotations(annotations)
 	}
-	return managed.ExternalUpdate{}, nil
+	return managed.ExternalUpdate{ConnectionDetails: conn}, nil
 }
 
 func (n *terraformPluginSDKExternal) Delete(ctx context.Context, _ xpresource.Managed) (managed.ExternalDelete, error) {

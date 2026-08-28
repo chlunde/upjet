@@ -1653,3 +1653,90 @@ func TestFilteredDiffExistsNestedAttributeRemoval(t *testing.T) {
 		})
 	}
 }
+
+// TestTPFUpdateConnectionDetails asserts that Update publishes the connection
+// details of the updated resource, and that they are computed from the
+// pre-conversion state map, exactly like Observe does. renameSecretConversion
+// makes the ordering observable, see its documentation.
+func TestTPFUpdateConnectionDetails(t *testing.T) {
+	newSchema := func() rschema.Schema {
+		return rschema.Schema{
+			Attributes: map[string]rschema.Attribute{
+				"name": rschema.StringAttribute{
+					Required: true,
+					PlanModifiers: []planmodifier.String{
+						stringplanmodifier.UseStateForUnknown(),
+					},
+				},
+				"id": rschema.StringAttribute{
+					Computed: true,
+					PlanModifiers: []planmodifier.String{
+						stringplanmodifier.UseStateForUnknown(),
+					},
+				},
+				"secret": rschema.StringAttribute{
+					Computed:  true,
+					Sensitive: true,
+				},
+			},
+		}
+	}
+	newResource := func() *mockTPFResource {
+		return &mockTPFResource{
+			SchemaMethod: func(_ context.Context, _ resource.SchemaRequest, response *resource.SchemaResponse) {
+				response.Schema = newSchema()
+			},
+			ReadMethod: func(_ context.Context, _ resource.ReadRequest, response *resource.ReadResponse) {
+				response.State = tfsdk.State{Raw: tftypes.Value{}, Schema: nil}
+			},
+		}
+	}
+	newCfg := func() *config.Resource {
+		c := connectionDetailsConfig()
+		c.TerraformResource = nil
+		c.TerraformPluginFrameworkResource = newResource()
+		return c
+	}
+	stateMap := map[string]any{
+		"id":     "example-id",
+		"name":   "example-updated",
+		"secret": "s3cret",
+	}
+	newTestConfig := func() testConfiguration {
+		return testConfiguration{
+			r:   newResource(),
+			cfg: newCfg(),
+			obj: connectionDetailsObject(),
+			currentStateMap: map[string]any{
+				"id":     "example-id",
+				"name":   "example",
+				"secret": "s3cret",
+			},
+			plannedStateMap: stateMap,
+			params: map[string]any{
+				"name": "example-updated",
+			},
+			newStateMap: stateMap,
+		}
+	}
+
+	updateConfig := newTestConfig()
+	update, err := prepareTPFExternalWithTestConfig(updateConfig).Update(context.TODO(), &updateConfig.obj)
+	if err != nil {
+		t.Fatalf("Update(...): unexpected error: %v", err)
+	}
+	want := managed.ConnectionDetails{"attribute.secret": []byte("s3cret")}
+	if diff := cmp.Diff(want, update.ConnectionDetails); diff != "" {
+		t.Errorf("\n%s\nUpdate(...): -want connection details, +got connection details:\n", diff)
+	}
+
+	observeConfig := newTestConfig()
+	observeConfig.currentStateMap = stateMap
+	observation, err := prepareTPFExternalWithTestConfig(observeConfig).Observe(context.TODO(), &observeConfig.obj)
+	if err != nil {
+		t.Fatalf("Observe(...): unexpected error: %v", err)
+	}
+	if diff := cmp.Diff(observation.ConnectionDetails, update.ConnectionDetails); diff != "" {
+		t.Errorf("\n%s\nUpdate(...): -want Observe connection details, +got Update connection details:\n", diff)
+	}
+}

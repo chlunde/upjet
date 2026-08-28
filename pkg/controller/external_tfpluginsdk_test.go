@@ -500,3 +500,117 @@ func TestTerraformPluginSDKDelete(t *testing.T) {
 		})
 	}
 }
+
+// renameSecretConversion is a config.TerraformConversion that renames the
+// "secret" attribute on the way back from the Terraform layer. Connection
+// details are derived from sensitive paths expressed against the native
+// Terraform schema, so they have to be computed before any conversion runs.
+// Registering this conversion in a test makes that ordering observable: if the
+// connection details are computed after the conversion, the "secret" path no
+// longer resolves and no details are produced at all.
+type renameSecretConversion struct{}
+
+func (renameSecretConversion) Convert(params map[string]any, _ *config.Resource, mode config.Mode) (map[string]any, error) {
+	if mode != config.FromTerraform {
+		return params, nil
+	}
+	if v, ok := params["secret"]; ok {
+		delete(params, "secret")
+		params["secret_converted"] = v
+	}
+	return params, nil
+}
+
+// connectionDetailsConfig returns a resource configuration with a sensitive
+// "secret" attribute and a conversion that renames it.
+func connectionDetailsConfig() *config.Resource {
+	return &config.Resource{
+		TerraformResource: &schema.Resource{
+			Timeouts: &schema.ResourceTimeout{
+				Create: &timeout,
+				Read:   &timeout,
+				Update: &timeout,
+				Delete: &timeout,
+			},
+			Schema: map[string]*schema.Schema{
+				"name": {
+					Type:     schema.TypeString,
+					Required: true,
+				},
+				"id": {
+					Type:     schema.TypeString,
+					Computed: true,
+				},
+				"secret": {
+					Type:      schema.TypeString,
+					Computed:  true,
+					Sensitive: true,
+				},
+			},
+		},
+		ExternalName: config.IdentifierFromProvider,
+		Sensitive: config.Sensitive{AdditionalConnectionDetailsFn: func(_ map[string]any) (map[string][]byte, error) {
+			return nil, nil
+		}},
+		TerraformConversions: []config.TerraformConversion{renameSecretConversion{}},
+	}
+}
+
+func connectionDetailsObject() fake.Terraformed {
+	return fake.Terraformed{
+		Parameterizable: fake.Parameterizable{
+			Parameters: map[string]any{
+				"name": "example",
+			},
+		},
+		Observable: fake.Observable{
+			Observation: map[string]any{},
+		},
+		MetadataProvider: fake.MetadataProvider{
+			ConnectionDetailsMapping: map[string]string{
+				"secret": "spec.forProvider.secretSecretRef",
+			},
+		},
+	}
+}
+
+// TestTerraformPluginSDKUpdateConnectionDetails asserts that Update publishes
+// the connection details of the updated resource, and that they are computed
+// from the pre-conversion state map, exactly like Observe does.
+func TestTerraformPluginSDKUpdateConnectionDetails(t *testing.T) {
+	newState := &tf.InstanceState{
+		ID: "example-id",
+		Attributes: map[string]string{
+			"id":     "example-id",
+			"name":   "example",
+			"secret": "s3cret",
+		},
+	}
+	r := mockResource{
+		ApplyFn: func(_ context.Context, _ *tf.InstanceState, _ *tf.InstanceDiff, _ interface{}) (*tf.InstanceState, diag.Diagnostics) {
+			return newState, nil
+		},
+		RefreshWithoutUpgradeFn: func(_ context.Context, _ *tf.InstanceState, _ interface{}) (*tf.InstanceState, diag.Diagnostics) {
+			return newState, nil
+		},
+	}
+
+	updateObj := connectionDetailsObject()
+	update, err := prepareTerraformPluginSDKExternal(r, connectionDetailsConfig()).Update(t.Context(), &updateObj)
+	if err != nil {
+		t.Fatalf("Update(...): unexpected error: %v", err)
+	}
+	want := managed.ConnectionDetails{"attribute.secret": []byte("s3cret")}
+	if diff := cmp.Diff(want, update.ConnectionDetails); diff != "" {
+		t.Errorf("\n%s\nUpdate(...): -want connection details, +got connection details:\n", diff)
+	}
+
+	observeObj := connectionDetailsObject()
+	observation, err := prepareTerraformPluginSDKExternal(r, connectionDetailsConfig()).Observe(t.Context(), &observeObj)
+	if err != nil {
+		t.Fatalf("Observe(...): unexpected error: %v", err)
+	}
+	if diff := cmp.Diff(observation.ConnectionDetails, update.ConnectionDetails); diff != "" {
+		t.Errorf("\n%s\nUpdate(...): -want Observe connection details, +got Update connection details:\n", diff)
+	}
+}
