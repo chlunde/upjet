@@ -756,7 +756,23 @@ func (n *terraformPluginSDKExternal) assertNoForceNew() error {
 	return nil
 }
 
-func (n *terraformPluginSDKExternal) Update(ctx context.Context, mg xpresource.Managed) (managed.ExternalUpdate, error) { //nolint:gocyclo
+// Update applies the diff computed by the preceding Observe. The changed
+// attribute set that made the resource not up-to-date is reported in the
+// returned managed.ExternalUpdate.AdditionalDetails, which crossplane-runtime
+// forwards to the change log service - on the error paths as well as on
+// success, so that a refused or failed update names the attributes that
+// triggered it. Create and Delete deliberately report nothing: at create time
+// the diff is the whole desired configuration, which the change log entry
+// already carries in its resource snapshot, and at delete time the diff is
+// empty save for the destroy marker.
+func (n *terraformPluginSDKExternal) Update(ctx context.Context, mg xpresource.Managed) (eu managed.ExternalUpdate, _ error) { //nolint:gocyclo
+	// Collected before the diff is handed to the plugin SDK, which consumes
+	// and mutates it while applying.
+	details := changedAttributesFromInstanceDiff(n.instanceDiff, n.config).additionalDetails()
+	defer func() {
+		eu.AdditionalDetails = details
+	}()
+
 	if n.config.UpdateLoopPrevention != nil {
 		preventResult, err := n.config.UpdateLoopPrevention.UpdateLoopPreventionFunc(n.instanceDiff, mg)
 		if err != nil {

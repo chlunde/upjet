@@ -103,7 +103,10 @@ type terraformPluginFrameworkExternalClient struct {
 	params          map[string]any
 	planResponse    *tfprotov6.PlanResourceChangeResponse
 	plannedIdentity *tfprotov6.ResourceIdentityData
-	resourceSchema  rschema.Schema
+	// changedAttributes is the attribute path set of the diff computed during
+	// Observe, reported by Update in its AdditionalDetails.
+	changedAttributes *changedAttributes
+	resourceSchema    rschema.Schema
 	// the terraform value type associated with the resource schema
 	resourceValueTerraformType tftypes.Type
 	// configured value for the resource in terraform type system
@@ -364,6 +367,12 @@ func (c *TerraformPluginFrameworkConnector) getResourceConfigTerraformValue(ctx 
 //     computed-only. Such a case is taken as a previously set value being
 //     unset and is thus, not filtered.
 func (n *terraformPluginFrameworkExternalClient) filteredDiffExists(ctx context.Context, rawDiff []tftypes.ValueDiff) bool {
+	return len(n.filterDiff(ctx, rawDiff)) > 0
+}
+
+// filterDiff returns the subset of rawDiff that is considered an actual diff,
+// applying the filters documented on filteredDiffExists.
+func (n *terraformPluginFrameworkExternalClient) filterDiff(ctx context.Context, rawDiff []tftypes.ValueDiff) []tftypes.ValueDiff {
 	filteredDiff := make([]tftypes.ValueDiff, 0)
 	for _, diff := range rawDiff {
 		// Keep diffs where the planned value is non-null and known.
@@ -384,7 +393,7 @@ func (n *terraformPluginFrameworkExternalClient) filteredDiffExists(ctx context.
 		}
 		filteredDiff = append(filteredDiff, diff)
 	}
-	return len(filteredDiff) > 0
+	return filteredDiff
 }
 
 // isUnderComputedOnlyAttribute returns true if the attribute itself or
@@ -447,6 +456,7 @@ func (n *terraformPluginFrameworkExternalClient) getDiffPlanResponse(ctx context
 	if err != nil {
 		return nil, false, errors.Wrap(err, "cannot compare prior state and plan")
 	}
+	filteredDiff := n.filterDiff(ctx, rawDiff)
 
 	if err := n.filterRequiresReplace(ctx, planResponse, tfStateValue, plannedStateValue); err != nil {
 		return nil, false, errors.Wrap(err, "failed to check for required replacement fields")
@@ -454,8 +464,12 @@ func (n *terraformPluginFrameworkExternalClient) getDiffPlanResponse(ctx context
 	if n.supportsIdentity() {
 		n.plannedIdentity = planResponse.PlannedIdentity
 	}
+	// The filtered diff is the only place the changed attribute set is
+	// available; the plan response itself only carries the planned state.
+	// Update reports it in its AdditionalDetails.
+	n.changedAttributes = changedAttributesFromValueDiffs(ctx, filteredDiff, n.resourceSchema, planResponse.RequiresReplace, n.config)
 
-	return planResponse, n.filteredDiffExists(ctx, rawDiff), nil
+	return planResponse, len(filteredDiff) > 0, nil
 }
 
 // filterRequiresReplace checks the TF plan response for fields that require/force resource
@@ -875,7 +889,21 @@ func (n *terraformPluginFrameworkExternalClient) planRequiresReplace() (bool, st
 
 }
 
-func (n *terraformPluginFrameworkExternalClient) Update(ctx context.Context, mg xpresource.Managed) (managed.ExternalUpdate, error) { //nolint:gocyclo // easier to follow as a unit
+// Update applies the plan computed by the preceding Observe. The changed
+// attribute set that made the resource not up-to-date is reported in the
+// returned managed.ExternalUpdate.AdditionalDetails, which crossplane-runtime
+// forwards to the change log service - on the error paths as well as on
+// success, so that a refused or failed update names the attributes that
+// triggered it. Create and Delete deliberately report nothing: at create time
+// the plan is the whole desired configuration, which the change log entry
+// already carries in its resource snapshot, and at delete time the planned
+// state is empty.
+func (n *terraformPluginFrameworkExternalClient) Update(ctx context.Context, mg xpresource.Managed) (eu managed.ExternalUpdate, _ error) { //nolint:gocyclo // easier to follow as a unit
+	details := n.changedAttributes.additionalDetails()
+	defer func() {
+		eu.AdditionalDetails = details
+	}()
+
 	n.logger.Debug("Updating the external resource")
 	// refuse plans that require replace for XRM compliance
 	if isReplace, fields := n.planRequiresReplace(); isReplace {
