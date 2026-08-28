@@ -192,14 +192,42 @@ func WithConditionalFilter(cName string, initProvider map[string]any) GenericLat
 	}
 }
 
+// convertFieldPathToSnake converts each field name segment of the given
+// camelCase field path to snake_case, preserving the structure of the path,
+// i.e. the "." separators and the array index segments, e.g.
+// "fooBar[0].bazQux" is converted to "foo_bar[0].baz_qux". Field name
+// segments without any upper-case characters are kept as they are, so that a
+// path already in snake_case (e.g. "ipv6_addresses") is returned unchanged.
+func convertFieldPathToSnake(fieldPath string) (string, error) {
+	segments, err := fieldpath.Parse(fieldPath)
+	if err != nil {
+		return "", errors.Wrapf(err, "cannot parse the field path %q", fieldPath)
+	}
+	for i, s := range segments {
+		if s.Type != fieldpath.SegmentField || strings.ToLower(s.Field) == s.Field {
+			continue
+		}
+		segments[i].Field = name.NewFromCamel(s.Field).Snake
+	}
+	return segments.String(), nil
+}
+
 func conditionalFilter(cName string, initProvider map[string]any) ConditionalFilter {
 	return func(cn string) bool {
 		if cName != cn {
 			return false
 		}
 
+		// Canonical names are dot-separated field paths, so the camelCase to
+		// snake_case conversion must be done segment-wise. spec.initProvider
+		// is unmarshaled with the "tf" tags, so its keys are the snake_case
+		// Terraform names.
+		snakeName, err := convertFieldPathToSnake(cName)
+		if err != nil {
+			return false
+		}
 		paved := fieldpath.Pave(initProvider)
-		value, err := paved.GetValue(name.NewFromCamel(cName).Snake)
+		value, err := paved.GetValue(snakeName)
 		if err != nil || value == nil {
 			return false
 		}

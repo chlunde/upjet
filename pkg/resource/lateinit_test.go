@@ -538,3 +538,113 @@ func TestLateInitialize(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertFieldPathToSnake(t *testing.T) {
+	cases := map[string]struct {
+		fieldPath string
+		want      string
+	}{
+		"NestedPath": {
+			fieldPath: "ScalingConfig.MaxSize",
+			want:      "scaling_config.max_size",
+		},
+		"SingleSegment": {
+			fieldPath: "ScalingConfig",
+			want:      "scaling_config",
+		},
+		"IndexedPath": {
+			fieldPath: "FooBar[0].BazQux",
+			want:      "foo_bar[0].baz_qux",
+		},
+		"WildcardPath": {
+			fieldPath: "FooBar[*].BazQux",
+			want:      "foo_bar[*].baz_qux",
+		},
+		"AlreadySnakeWithDigit": {
+			fieldPath: "ipv6_addresses",
+			want:      "ipv6_addresses",
+		},
+		"AlreadySnakeNested": {
+			fieldPath: "block_device_mappings.ebs",
+			want:      "block_device_mappings.ebs",
+		},
+		"EmptyPath": {
+			fieldPath: "",
+			want:      "",
+		},
+	}
+	for n, tc := range cases {
+		t.Run(n, func(t *testing.T) {
+			got, err := convertFieldPathToSnake(tc.fieldPath)
+			if err != nil {
+				t.Fatalf("convertFieldPathToSnake(%q): unexpected error: %v", tc.fieldPath, err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("convertFieldPathToSnake(%q): -want, +got:\n%s", tc.fieldPath, diff)
+			}
+		})
+	}
+}
+
+func TestConditionalFilter(t *testing.T) {
+	cases := map[string]struct {
+		reason       string
+		cName        string
+		initProvider map[string]any
+		cn           string
+		want         bool
+	}{
+		"TopLevelFieldSetInInitProvider": {
+			reason:       "A top-level canonical name set in spec.initProvider should be filtered.",
+			cName:        "ScalingConfig",
+			initProvider: map[string]any{"scaling_config": map[string]any{"max_size": float64(3)}},
+			cn:           "ScalingConfig",
+			want:         true,
+		},
+		"TopLevelFieldNotSetInInitProvider": {
+			reason:       "A top-level canonical name absent from spec.initProvider should not be filtered.",
+			cName:        "ScalingConfig",
+			initProvider: map[string]any{},
+			cn:           "ScalingConfig",
+			want:         false,
+		},
+		"NestedFieldSetInInitProvider": {
+			reason:       "A nested canonical name set in spec.initProvider should be filtered.",
+			cName:        "ScalingConfig.MaxSize",
+			initProvider: map[string]any{"scaling_config": map[string]any{"max_size": float64(3)}},
+			cn:           "ScalingConfig.MaxSize",
+			want:         true,
+		},
+		"NestedFieldNotSetInInitProvider": {
+			reason:       "A nested canonical name absent from spec.initProvider should not be filtered.",
+			cName:        "ScalingConfig.MinSize",
+			initProvider: map[string]any{"scaling_config": map[string]any{"max_size": float64(3)}},
+			cn:           "ScalingConfig.MinSize",
+			want:         false,
+		},
+		"DeeplyNestedFieldSetInInitProvider": {
+			reason: "A canonical name nested more than two levels deep should be filtered.",
+			cName:  "LaunchTemplate.BlockDeviceMappings.VolumeSize",
+			initProvider: map[string]any{"launch_template": map[string]any{
+				"block_device_mappings": map[string]any{"volume_size": float64(10)},
+			}},
+			cn:   "LaunchTemplate.BlockDeviceMappings.VolumeSize",
+			want: true,
+		},
+		"DifferentCanonicalName": {
+			reason:       "A canonical name other than the configured one should not be filtered.",
+			cName:        "ScalingConfig.MaxSize",
+			initProvider: map[string]any{"scaling_config": map[string]any{"max_size": float64(3)}},
+			cn:           "ScalingConfig.MinSize",
+			want:         false,
+		},
+	}
+	for n, tc := range cases {
+		t.Run(n, func(t *testing.T) {
+			got := conditionalFilter(tc.cName, tc.initProvider)(tc.cn)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("\n%s\nconditionalFilter(%q, ...)(%q): -want, +got:\n%s", tc.reason, tc.cName, tc.cn, diff)
+			}
+		})
+	}
+}
